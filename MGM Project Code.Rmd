@@ -1,0 +1,340 @@
+---
+title: "Term Project Group 4"
+author: "Group4"
+date: '2023-03-03'
+output: html_document
+---
+
+```{r , include=FALSE}
+rm(list=ls())
+library(fpp2) 
+library(gridExtra)
+library(dplyr)
+library(astsa)
+library(TSstudio)
+library(seasonal)
+library(vars)
+library(lmtest)
+library(broom)
+library(readxl)
+```
+
+
+Data Cleaning
+```{r}
+mgm <-  read_excel("Term Project.xls", sheet = 'MGM Quarterly Revenue')
+
+mgm <- mgm[,14] %>%
+  filter(revtq>0) 
+
+summary(mgm)
+
+ts_mgm = ts(mgm , start = c(1987,3), end = c(2022,3) , deltat = 1/4)
+autoplot(ts_mgm)
+tsdisplay(ts_mgm)
+
+ln_mgm <- log(ts_mgm)
+autoplot(ln_mgm)
+tsdisplay(ln_mgm)
+summary(ln_mgm)
+```
+
+
+
+Pre Modelling Data formatting
+```{r}
+nsdiffs(ts_mgm)
+ndiffs(ts_mgm)   #d = 1 in out ARIMA models below
+
+
+nsdiffs(ln_mgm)
+ndiffs(ln_mgm)
+ln_mgm_stat <- diff(ln_mgm)
+
+mgm_boxcox <- BoxCox(ln_mgm_stat , lambda = BoxCox.lambda(ln_mgm_stat))
+autoplot(mgm_boxcox)
+autoplot(ln_mgm_stat)
+#based on visual inspection ONLY, there does not appear to be significant differences in the 2 time series.  Large number of transformations will make it harder to interpret our solution, so we discard Box Cox!!
+```
+
+Splitting data
+```{r}
+outofsamplequarters = 29  # 20% of 141 (rounded up)
+ln_mgm_stat_split = ts_split(ln_mgm_stat, sample.out = outofsamplequarters) # Differenced Log-revenue of MGM split into training and test set
+ln_mgm_split <- ts_split(ln_mgm, sample.out = outofsamplequarters) # Log-revenue of MGM split into training and test set
+```
+
+Benchmark Modelling - In sample evaluation
+```{r}
+autoplot(decompose(ts_mgm, type='multiplicative'))  #amplitude appears to be stationary over time, hence additive decomposition is more suitable
+autoplot(decompose(ts_mgm, type='additive'))   
+
+seasonalcomponent = seasonal(decompose(ln_mgm_stat_split$train))
+trendcyclecomponent = (trendcycle(decompose(ln_mgm_stat_split$train)))
+
+# 1. Classical decomposition, naive + snaive model 
+additiveforecast1 = (snaive(seasonalcomponent, h = outofsamplequarters))$mean + (naive(trendcyclecomponent, h = outofsamplequarters))$mean
+autoplot(additiveforecast1) + autolayer(ln_mgm_stat_split$test) + ggtitle("Model 1")
+
+# 2. Classical decomposition, mean + snaive model
+additiveforecast2 = (snaive(seasonalcomponent, h = outofsamplequarters))$mean + (meanf(trendcyclecomponent, h = outofsamplequarters))$mean
+autoplot(additiveforecast2) + autolayer(ln_mgm_stat_split$test)+ ggtitle("Model 2")
+
+# 3. Classical decomposition, drift + snaive model
+additiveforecast3 = (snaive(seasonalcomponent, h = outofsamplequarters))$mean + (rwf(trendcyclecomponent, h = outofsamplequarters, drift=TRUE))$mean
+autoplot(additiveforecast3) + autolayer(ln_mgm_stat_split$test)+ ggtitle("Model 3")
+
+# 4. Stl decomposition, naive + snaive
+seasonalcomponent2 = seasonal(mstl(ln_mgm_stat_split$train))
+trendcyclecomponent2 = (trendcycle(mstl(ln_mgm_stat_split$train)))
+additiveforecast4 = (snaive(seasonalcomponent2, h = outofsamplequarters))$mean + (naive(trendcyclecomponent2, h = outofsamplequarters))$mean
+autoplot(additiveforecast4) + autolayer(ln_mgm_stat_split$test) + ggtitle("Model 4")
+
+# 5. stl decomposition, drift + snaive model
+additiveforecast5 = (snaive(seasonalcomponent2, h = outofsamplequarters))$mean + (rwf(trendcyclecomponent2, h = outofsamplequarters, drift=TRUE))$mean
+autoplot(additiveforecast5) + autolayer(ln_mgm_stat_split$test)+ ggtitle("Model 5")
+```
+
+Ljung Box Test - On training data 
+```{r}
+fitted1 = (snaive(seasonalcomponent))$fitted + (naive(trendcyclecomponent))$fitted
+autoplot(fitted1) + autolayer(ln_mgm_stat)
+residuals1 = ln_mgm_stat- fitted1 
+Box.test(residuals1, type = c("Ljung-Box"))  #No Time series information present in residuals, can consider this benchmark model
+
+fitted2 = (snaive(seasonalcomponent))$fitted + (meanf(trendcyclecomponent))$fitted
+autoplot(fitted2) + autolayer(ln_mgm_stat)
+residuals2 = ln_mgm_stat - fitted2 
+Box.test(residuals2, type = c("Ljung-Box"))  #Time series information present in residuals, cannot use this benchmark model
+
+fitted3 = (snaive(seasonalcomponent))$fitted + (rwf(trendcyclecomponent, drift = TRUE))$fitted
+autoplot(fitted3) + autolayer(ln_mgm_stat)
+residuals3 = ln_mgm_stat - fitted3
+Box.test(residuals3, type = c("Ljung-Box"))  #No Time series information present in residuals, can consider this benchmark model
+
+fitted4 = (snaive(seasonalcomponent2))$fitted + (naive(trendcyclecomponent2))$fitted
+autoplot(fitted4) + autolayer(ln_mgm_stat)
+residuals4 = ln_mgm_stat - fitted4
+Box.test(residuals4, type = c("Ljung-Box"))  #Time series information present in residuals, cannot use this benchmark model
+
+fitted5 = (snaive(seasonalcomponent2))$fitted + (rwf(trendcyclecomponent2 , drift = TRUE))$fitted
+autoplot(fitted5) + autolayer(ln_mgm_stat)
+residuals5 = ln_mgm_stat - fitted5
+Box.test(residuals5, type = c("Ljung-Box"))  #Time series information present in residuals, cannot use this benchmark model
+
+### Only models 1 and 3 have no TS information present in the residuals and can be used to check for out of sample performance. 
+
+#Out of sample performance
+accuracy(additiveforecast1, x = ln_mgm_stat_split$test) # Lower MAPE of 164.127, this is the selected benchamrk model to be compared against
+accuracy(additiveforecast3, x = ln_mgm_stat_split$test)
+```
+
+
+Arima
+```{r}
+auto.arima(ln_mgm_split$train)  #auto arima without box cox AICc=63.54 and order (2,1,1)
+auto.arima(BoxCox(ln_mgm_split$train, lambda = BoxCox.lambda(ln_mgm_split$train)))   #auto arima with box cox,  AICc=331.74 and order (0,1,1) #AICc is higher and we discard this model
+Arima(ln_mgm_split$train, order = c(1,1,1) , include.drift = TRUE , lambda = 'auto' )  #AICc=333.1, higher than box cox transformation. Hence, it will not be selected as our model
+Arima(ln_mgm_split$train, order = c(1,1,1) , include.drift = TRUE) #AICc=66.27 higher than auto.arima (2,1,1) specification
+Arima(ln_mgm_split$train, order = c(0,1,1) , include.drift = TRUE) #AICc=68.11 
+Arima(ln_mgm_split$train, order = c(1,1,0) , include.drift = TRUE) #AICc=66.99
+Arima(ln_mgm_split$train, order = c(3,1,1) , include.drift = TRUE) #AICc=67.63  
+Arima(ln_mgm_split$train, order = c(2,1,1) , include.drift = TRUE) #AICc=63.54 Lowest specification is ARIMA(2,1,1)
+
+arima_211 = Arima(ln_mgm_split$train, order = c(2,1,1) , include.drift = TRUE) #Selected Arima model is Arima(2,1,1)
+
+#In of sample evaluation using ARIMA(2,1,1)
+summary(arima_211)
+
+#In sample test on Arima(2,1,1)
+checkresiduals(arima_211) #pvalue of 0.1853, do not reject null hypothesis, no time series infomation in residuals, Ljung Box test passed.
+
+model1 = Arima(ln_mgm_split$train, order=c(2,1,1), seasonal=c(0,0,0))
+autoplot(forecast(model1, h=outofsamplequarters), include= 112) + autolayer(ln_mgm_split$test)
+
+accuracy(x = ln_mgm_split$test, forecast(model1, h= outofsamplequarters), include= 112)
+
+
+checkresiduals(model1)
+
+
+## For report writing, don't take reference of the prediction interval due to logging of data (explain more)..
+
+
+```
+
+
+
+
+
+Exogenous Variables
+```{r}
+# USFeds
+USFeds <- read_excel('Term Project.xls', sheet = 'FED FUNDS', range = paste0("A", 1, ":", 'A', 145))
+ts_USFeds <- ts(USFeds, start = c(1987,3), end = c(2022,3), deltat = 1/4)
+autoplot(ts_USFeds)
+
+nsdiffs(ts_USFeds)
+ndiffs(ts_USFeds, test = 'kpss', alpha = 0.05)
+ts_stat_USFeds <- diff(ts_USFeds) #1 diff 
+ts_stat_USFeds2 <- diff(ts_stat_USFeds) # to be used for arima-x later on
+ndiffs(ts_stat_USFeds)
+autoplot(ts_stat_USFeds)
+
+# SNP
+SNP <- read_excel('Term Project.xls', sheet = 'SNP', range = paste0("A", 1, ":", 'A', 145))
+ts_SNP <- ts(SNP, start = c(1987,3), end = c(2022,3), deltat = 1/4)
+autoplot(ts_SNP)
+
+nsdiffs(ts_SNP)
+ndiffs(ts_SNP)
+ts_stat_SNP <- diff(diff(ts_SNP)) #2 diff
+ndiffs(ts_stat_SNP)
+autoplot(ts_stat_SNP)
+
+# US GDPPC
+USGDPPC <- read_excel('Term Project.xls', sheet = 'US GDP PERCAP', range = paste0('B', 1, ':', 'B', 145))
+ts_usgdppc <- ts(USGDPPC, start = c(1987,3), end = c(2022, 3), deltat = 1/4)
+autoplot(ts_usgdppc)
+
+nsdiffs(ts_usgdppc)
+ndiffs(ts_usgdppc)   
+ts_stat_usgdppc <- diff(ts_usgdppc) #1 diff 
+ts_stat_usgdppc2 <- diff(ts_stat_usgdppc)# to be used for arima-x later on
+autoplot(ts_stat_usgdppc)
+
+# US CPI
+CPI_quarterly <- read_excel('Term Project.xls', sheet = 'Quarterly CPI', range = paste0('B', 1, ':', 'B', 145))
+ts_CPI <- ts(CPI_quarterly, start = c(1987,3), end = c(2022, 3), deltat = 1/4)
+autoplot(ts_CPI)
+
+nsdiffs(ts_CPI)
+ndiffs(ts_CPI)
+ts_stat_cpi <- diff(ts_CPI) #1 diff
+```
+
+Checking for granger causality for exogenous variable on MGM's Revenue
+```{r}
+
+# Granger test for log-revenue and US rates
+grangertest(ts_stat_USFeds, ln_mgm_stat, order = 1) #US rates does not granger cause log-revenue
+grangertest(ts_stat_USFeds, ln_mgm_stat, order = 2) #US rates does not granger cause log-revenue
+grangertest(ts_stat_USFeds, ln_mgm_stat, order = 3) #US rates does not granger cause log-revenue
+grangertest(ts_stat_USFeds, ln_mgm_stat, order = 4) #US rates does not granger cause log-revenue
+
+grangertest(ln_mgm_stat, ts_stat_USFeds, order = 1) # Log-revenue does not granger cause US rates
+grangertest(ln_mgm_stat, ts_stat_USFeds, order = 2) # Log-revenue does not granger cause US rates
+grangertest(ln_mgm_stat, ts_stat_USFeds, order = 3) # Log-revenue does not granger cause US rates
+grangertest(ln_mgm_stat, ts_stat_USFeds, order = 4) # Log-revenue does not granger cause US rates
+
+# Log-revenue of MGM does not granger cause US rates and vice-versa. 
+
+# Granger test for log-revenue and SNP
+grangertest(ts_stat_SNP, ln_mgm_stat, order = 1) # SNP does not granger cause log-revenue
+grangertest(ts_stat_SNP, ln_mgm_stat, order = 2) # SNP does not granger cause log-revenue
+grangertest(ts_stat_SNP, ln_mgm_stat, order = 3) # SNP does not granger cause log-revenue
+grangertest(ts_stat_SNP, ln_mgm_stat, order = 4) # SNP does not granger cause log-revenue
+
+grangertest(ln_mgm_stat, ts_stat_SNP, order = 1) # Log-revenue granger cause SNP
+grangertest(ln_mgm_stat, ts_stat_SNP, order = 2) # Log-revenue granger cause SNP
+grangertest(ln_mgm_stat, ts_stat_SNP, order = 3) # Log-revenue granger cause SNP
+grangertest(ln_mgm_stat, ts_stat_SNP, order = 4) # Log-revenue granger cause SNP
+
+# Log-revenue granger causees SNP but not the other way around. 
+
+# Granger test for log-revenue and US GDPPC
+grangertest(ts_stat_usgdppc, ln_mgm_stat, order = 1) # USGDPPC does not granger cause log-revenue
+grangertest(ts_stat_usgdppc, ln_mgm_stat, order = 2) # USGDPPC does not granger cause log-revenue 
+grangertest(ts_stat_usgdppc, ln_mgm_stat, order = 3) # USGDPPC does not granger cause log-revenue
+grangertest(ts_stat_usgdppc, ln_mgm_stat, order = 4) # USGDPPC does not granger cause log-revenue
+
+grangertest(ln_mgm_stat, ts_stat_usgdppc, order = 1) # log-revenue does not granger cause USGDPPC
+grangertest(ln_mgm_stat, ts_stat_usgdppc, order = 2) # log-revenue granges cause USGDPPC
+grangertest(ln_mgm_stat, ts_stat_usgdppc, order = 3) # log-revenue granges cause USGDPPC
+grangertest(ln_mgm_stat, ts_stat_usgdppc, order = 4) # log-revenue granges cause USGDPPC
+
+# Log-revenue granger causes UDGDPPC but not the other way around.
+
+# Granger test for log-revenue and US CPI
+grangertest(ts_stat_cpi, ln_mgm_stat, order = 1) # US CPI does not granger cause log-revenue
+grangertest(ts_stat_cpi, ln_mgm_stat, order = 2) # US CPI does not granger cause log-revenue
+grangertest(ts_stat_cpi, ln_mgm_stat, order = 3) # US CPI does not granger cause log-revenue
+grangertest(ts_stat_cpi, ln_mgm_stat, order = 4) # US CPI does not granger cause log-revenue
+
+grangertest(ln_mgm_stat, ts_stat_cpi, order = 1) # Log-revenue does not granger cause US CPI
+grangertest(ln_mgm_stat, ts_stat_cpi, order = 2) # Log-revenue does not granger cause US CPI
+grangertest(ln_mgm_stat, ts_stat_cpi, order = 3) # Log-revenue does not granger cause US CPI
+grangertest(ln_mgm_stat, ts_stat_cpi, order = 4) # Log-revenue does not granger cause US CPI
+
+
+# Log-revenue does not granger cause US CPI and US CPI does not granger cause log-revenue
+
+
+```
+
+
+ARIMA-X
+```{r ARIMA-X}
+ln_mgm2 <- ts(ln_mgm[3:141,], start = c(1988, 1), end = c(2022, 3), deltat = 1/4)
+
+ln_mgm2_split <- ts_split(ln_mgm2, sample.out = outofsamplequarters)
+arima_gdp_split <- ts_split(ts_stat_usgdppc2, sample.out = outofsamplequarters)
+arima_Feds_split <- ts_split(ts_stat_USFeds2, sample.out = outofsamplequarters)
+arima_SNP_split <- ts_split(ts_stat_SNP, sample.out = outofsamplequarters)
+
+
+arimax3 <- stlf(ln_mgm2_split$train, h = outofsamplequarters, method = 'arima', lambda='auto' , xreg = cbind(arima_Feds_split$train, arima_gdp_split$train, arima_SNP_split$train), newxreg = cbind(arima_Feds_split$test, arima_gdp_split$test, arima_SNP_split$test))
+accuracy(arimax3, ln_mgm2_split$test)
+checkresiduals(arimax3)
+
+
+arimax1 <- stlf(ln_mgm2_split$train, h = outofsamplequarters, method = 'arima', lambda='auto' , xreg = cbind(arima_Feds_split$train), newxreg = arima_Feds_split$test)
+accuracy(arimax1,ln_mgm2_split$test)
+checkresiduals(arimax1)
+
+
+autoplot(arimax3) + autolayer(ln_mgm2)
+
+autoplot(arimax1) + autolayer(ln_mgm2)
+
+```
+
+
+Prophet Model 
+```{r}
+
+library(prophet)
+library(dbplyr)
+library(lubridate) 
+mgm2 <-  read_excel("Term Project.xls", sheet = 'MGM Quarterly Revenue') 
+mgmdates <- mgm2[3:143,2] 
+mgmrev <- mgm2[,14] %>%   filter(revtq>0)  
+PreProphet <- cbind(mgmdates, mgmrev)  
+PreProphet <- mutate(PreProphet, ds = ymd(PreProphet[,1]))  
+PreProphet <- mutate(PreProphet, y = log(revtq))  
+PreProphet <- dplyr::select(PreProphet, ds, y) 
+set.seed(1) 
+train  <- PreProphet[1:110,] 
+test   <- PreProphet[111:141,] 
+ProphetModel <- prophet(train, seasonality.mode = "additive")  
+future = make_future_dataframe(ProphetModel,periods = 29,freq = 'quarter') 
+Prediction <- predict(ProphetModel,period = future) 
+plot(ProphetModel, Prediction) 
+prophet_plot_components(ProphetModel, Prediction) 
+forecast_metric_data = Prediction %>%    as_tibble()  
+MAPE = mean(abs((test$y- (forecast_metric_data$yhat))/test$y)*100)
+MAPE
+```
+
+Cubic Spline
+```{r}
+autoplot(splinef(ln_mgm_split$train, h = outofsamplequarters)) + autolayer(ln_mgm_split$test)
+cubic_forecast = splinef(ln_mgm_split$train , h = outofsamplequarters)
+accuracy_spline = accuracy(cubic_forecast ,ln_mgm_split$test )
+accuracy_spline
+
+#                       ME      RMSE       MAE        MPE     MAPE      MASE       ACF1 Theil's U
+#Training set -0.001244072 0.3914892 0.1930747  0.6351885 5.417224 0.4655893 0.09873828        NA
+#Test set     -0.250023430 0.5556684 0.2663498 -3.7024807 3.905563 0.6422883 0.54281618  1.123009
+
+```
